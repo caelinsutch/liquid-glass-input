@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Liquid glass input</title>
+<style>
+  html,body { margin:0; height:100%; font-family:system-ui,sans-serif; }
+
+  /* The root must be positioned. Glass elements must be direct children. */
+  #root { position:relative; height:100%; display:grid; place-items:center; }
+
+  /* The background lives in a sibling INSIDE the root, not on the root. */
+  #bg { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+
+  /* The glass element. The library injects a <canvas> as its first child
+     with z-index:-1 and pointer-events:none, so real children stay usable. */
+  .glass-field {
+    position:relative;
+    isolation:isolate;            /* keeps the z-index:-1 canvas inside this box */
+    width:min(420px, 80vw);
+    height:56px;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:0 18px;
+    box-sizing:border-box;
+    border-radius:28px;          /* keep in sync with cornerRadius */
+    background:transparent;      /* the shader paints the surface */
+  }
+
+  .glass-field input {
+    flex:1;
+    min-width:0;
+    background:transparent;
+    border:0;
+    outline:0;
+    font-size:16px;              /* 16px avoids iOS zoom on focus */
+    color:#fff;
+    caret-color:#fff;
+  }
+  .glass-field input::placeholder { color:rgba(255,255,255,.7); }
+
+  /* Focus ring: use outline. It paints above the injected canvas. */
+  .glass-field:focus-within { outline:2px solid rgba(255,255,255,.85); outline-offset:2px; }
+
+  .icon { width:18px; height:18px; color:rgba(255,255,255,.85); flex:none; }
+
+  /* Fallback when WebGL or the library is unavailable. */
+  .no-glass .glass-field {
+    background:rgba(255,255,255,.18);
+    backdrop-filter:blur(12px) saturate(1.2);
+    border:1px solid rgba(255,255,255,.35);
+  }
+</style>
+</head>
+<body>
+  <div id="root">
+    <img id="bg" crossorigin="anonymous"
+         src="https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?w=2000&q=80" alt="">
+
+    <label class="glass-field" data-config='{"cornerRadius":28,"zRadius":18,"blurAmount":0.28,"refraction":0.6,"chromAberration":0.04,"edgeHighlight":0.08,"fresnel":1,"brightness":-0.08,"shadowOpacity":0.25}'>
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+      </svg>
+      <input type="search" placeholder="Search anything" autocomplete="off">
+    </label>
+  </div>
+
+<script type="module">
+  const root = document.querySelector('#root');
+  try {
+    const { LiquidGlass } = await import('https://cdn.jsdelivr.net/npm/@ybouane/liquidglass/dist/index.js');
+    await document.fonts.ready;                 // fonts must load before init
+    await new Promise(r => {                    // and the background image
+      const img = document.querySelector('#bg');
+      img.complete ? r() : img.addEventListener('load', r, { once:true });
+    });
+    const instance = await LiquidGlass.init({
+      root,
+      glassElements: document.querySelectorAll('.glass-field'),
+    });
+    // Re-render the glass after the background changes.
+    // instance.markChanged(document.querySelector('#bg'));
+  } catch (err) {
+    console.warn('LiquidGlass unavailable, using CSS fallback:', err);
+    document.body.classList.add('no-glass');
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Liquid glass input — controls</title>
+<style>
+  :root { color-scheme:dark; }
+  html,body { margin:0; height:100%; font-family:system-ui,-apple-system,sans-serif; background:#111; }
+
+  /* ── Stage ─────────────────────────────────────────────
+     The root must be positioned. Glass elements must be
+     direct children of it. The control panel stays OUTSIDE
+     the root, or the shader would capture and refract it. */
+  #root { position:absolute; inset:0; display:grid; place-items:center; }
+  #bg { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+
+  .glass-field {
+    position:relative;
+    isolation:isolate;          /* keeps the z-index:-1 shader canvas inside this box */
+    width:420px;
+    height:56px;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:0 18px;
+    box-sizing:border-box;
+    border-radius:28px;         /* kept in sync with cornerRadius by JS */
+    background:transparent;     /* the shader paints the surface */
+  }
+  .glass-field input {
+    flex:1; min-width:0;
+    background:transparent; border:0; outline:0;
+    font-size:16px;             /* 16px avoids iOS zoom on focus */
+    color:var(--ink,#fff);
+    caret-color:var(--ink,#fff);
+  }
+  .glass-field input::placeholder { color:color-mix(in oklch, var(--ink,#fff) 70%, transparent); }
+  .glass-field:focus-within { outline:2px solid color-mix(in oklch, var(--ink,#fff) 85%, transparent); outline-offset:2px; }
+  .icon { width:18px; height:18px; color:var(--ink,#fff); flex:none; opacity:.85; }
+
+  /* ── Control panel ─────────────────────────────────── */
+  #panel {
+    position:fixed; top:0; right:0; bottom:0; width:320px;
+    overflow-y:auto; z-index:10;
+    padding:16px 18px 40px;
+    box-sizing:border-box;
+    background:rgba(18,18,20,.82);
+    backdrop-filter:blur(20px);
+    border-left:1px solid rgba(255,255,255,.12);
+    color:#eee; font-size:12px;
+  }
+  #panel h1 { font-size:13px; margin:0 0 4px; letter-spacing:.02em; }
+  #panel p.hint { margin:0 0 14px; color:#999; line-height:1.45; }
+  #panel h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:#8a8a92; margin:18px 0 8px; }
+  .row { display:grid; grid-template-columns:1fr 52px; gap:8px 10px; align-items:center; margin-bottom:9px; }
+  .row label { color:#cfcfd6; }
+  .row output { text-align:right; font-variant-numeric:tabular-nums; color:#fff; }
+  .row input[type=range] { grid-column:1 / -1; width:100%; margin:0; accent-color:#7aa2ff; }
+  .check { display:flex; align-items:center; gap:8px; margin-bottom:9px; color:#cfcfd6; }
+  .btns { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+  button, select {
+    font:inherit; color:#eee; background:#2a2a30;
+    border:1px solid rgba(255,255,255,.14); border-radius:7px;
+    padding:6px 10px; cursor:pointer;
+  }
+  button:hover { background:#34343c; }
+  pre#json {
+    margin:10px 0 0; padding:10px; border-radius:8px;
+    background:#0d0d10; border:1px solid rgba(255,255,255,.1);
+    color:#9fd0a0; font-size:11px; line-height:1.5;
+    white-space:pre-wrap; word-break:break-word;
+  }
+  #fps { position:fixed; left:12px; top:12px; z-index:10; font:12px/1 ui-monospace,monospace;
+         color:#fff; background:rgba(0,0,0,.45); padding:6px 8px; border-radius:6px; }
+</style>
+</head>
+<body>
+  <div id="root">
+    <img id="bg" crossorigin="anonymous" alt=""
+         src="https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?w=2000&q=80">
+
+    <label class="glass-field" id="field">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+      </svg>
+      <input type="search" placeholder="Search anything" autocomplete="off">
+    </label>
+  </div>
+
+  <div id="fps">– fps</div>
+
+  <aside id="panel">
+    <h1>Liquid glass input</h1>
+    <p class="hint">Every slider writes <code>data-config</code> on the field. The library re-shades on change.</p>
+    <div id="controls"></div>
+    <h2>Config</h2>
+    <pre id="json"></pre>
+    <div class="btns">
+      <button id="copy">Copy JSON</button>
+      <button id="reset">Reset</button>
+    </div>
+  </aside>
+
+<script type="module">
+const field    = document.getElementById('field');
+const root     = document.getElementById('root');
+const bg       = document.getElementById('bg');
+const controls = document.getElementById('controls');
+const jsonOut  = document.getElementById('json');
+
+// ── Slider definitions ────────────────────────────────
+// [key, label, min, max, step]
+const SHADER = [
+  ['blurAmount',      'Blur',              0,   1,    0.01],
+  ['refraction',      'Refraction',        0,   2,    0.01],
+  ['chromAberration', 'Chromatic aberr.',  0,   0.3,  0.005],
+  ['edgeHighlight',   'Edge highlight',    0,   0.5,  0.005],
+  ['specular',        'Specular',          0,   2,    0.01],
+  ['fresnel',         'Fresnel',           0,   3,    0.01],
+  ['distortion',      'Distortion noise',  0,   1,    0.01],
+];
+const SHAPE = [
+  ['cornerRadius',    'Corner radius (px)', 0,  120,  1],
+  ['zRadius',         'Bevel depth',        0,  120,  1],
+];
+const COLOR = [
+  ['brightness',      'Brightness',       -0.5, 0.5,  0.01],
+  ['saturation',      'Saturation',       -1,   1,    0.01],
+  ['tintStrength',    'Tint strength',     0,   1,    0.01],
+  ['opacity',         'Opacity',           0,   1,    0.01],
+];
+const SHADOW = [
+  ['shadowOpacity',   'Shadow opacity',    0,   1,    0.01],
+  ['shadowSpread',    'Shadow spread',     0,   40,   1],
+  ['shadowOffsetY',   'Shadow offset Y',  -20,  20,   1],
+];
+const LAYOUT = [
+  ['__width',         'Field width (px)',  160, 720,  2],
+  ['__height',        'Field height (px)', 32,  120,  1],
+];
+
+const DEFAULT_CONFIG = {
+  blurAmount: 0.28, refraction: 0.6, chromAberration: 0.04, edgeHighlight: 0.08,
+  specular: 0, fresnel: 1, distortion: 0,
+  cornerRadius: 28, zRadius: 18,
+  brightness: -0.08, saturation: 0, tintStrength: 0, opacity: 1,
+  shadowOpacity: 0.25, shadowSpread: 10, shadowOffsetY: 1,
+  bevelMode: 0, button: false, floating: false,
+};
+const DEFAULT_LAYOUT = { __width: 420, __height: 56, __ink: '#ffffff' };
+
+let config = { ...DEFAULT_CONFIG };
+let layout = { ...DEFAULT_LAYOUT };
+let instance = null;
+
+// ── Panel builder ─────────────────────────────────────
+function section(title, defs) {
+  const h = document.createElement('h2');
+  h.textContent = title;
+  controls.append(h);
+  for (const [key, label, min, max, step] of defs) {
+    const store = key.startsWith('__') ? layout : config;
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML =
+      `<label for="c_${key}">${label}</label><output id="o_${key}"></output>` +
+      `<input type="range" id="c_${key}" min="${min}" max="${max}" step="${step}" value="${store[key]}">`;
+    controls.append(row);
+    const input = row.querySelector('input');
+    const out   = row.querySelector('output');
+    out.textContent = store[key];
+    input.addEventListener('input', () => {
+      const v = parseFloat(input.value);
+      out.textContent = v;
+      (key.startsWith('__') ? layout : config)[key] = v;
+      key.startsWith('__') ? applyLayout() : applyConfig();
+    });
+  }
+}
+
+function toggle(key, label) {
+  const wrap = document.createElement('div');
+  wrap.className = 'check';
+  wrap.innerHTML = `<input type="checkbox" id="c_${key}"><label for="c_${key}">${label}</label>`;
+  controls.append(wrap);
+  const box = wrap.querySelector('input');
+  box.checked = !!config[key];
+  box.addEventListener('change', () => { config[key] = box.checked; reinit(); });
+}
+
+// ── Apply ─────────────────────────────────────────────
+function applyConfig() {
+  field.dataset.config = JSON.stringify(config);       // observed → re-shade
+  field.style.borderRadius = config.cornerRadius + 'px';
+  jsonOut.textContent = JSON.stringify(config, null, 2);
+}
+
+function applyLayout() {
+  field.style.width  = layout.__width + 'px';
+  field.style.height = layout.__height + 'px';
+  field.style.setProperty('--ink', layout.__ink);
+  // The library re-measures every canvas on window resize only.
+  window.dispatchEvent(new Event('resize'));
+}
+
+// `bevelMode`, `button`, and `floating` are read at init, so rebuild.
+async function reinit() {
+  applyConfig();
+  if (instance) { instance.destroy(); instance = null; }
+  await start();
+}
+
+async function start() {
+  const { LiquidGlass } = await import('https://cdn.jsdelivr.net/npm/@ybouane/liquidglass/dist/index.js');
+  await document.fonts.ready;
+  if (!bg.complete) await new Promise(r => bg.addEventListener('load', r, { once:true }));
+  instance = await LiquidGlass.init({ root, glassElements: [field] });
+}
+
+// ── Build the panel ───────────────────────────────────
+section('Shader',  SHADER);
+section('Shape',   SHAPE);
+section('Color',   COLOR);
+section('Shadow',  SHADOW);
+section('Layout',  LAYOUT);
+
+const modes = document.createElement('div');
+modes.className = 'btns';
+modes.innerHTML = `
+  <select id="bevel">
+    <option value="0">Bevel: biconvex pill</option>
+    <option value="1">Bevel: dome (lens)</option>
+  </select>
+  <select id="bgpick">
+    <option value="https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?w=2000&q=80">Background: canyon</option>
+    <option value="https://images.unsplash.com/photo-1502082553048-f009c37129b9?w=2000&q=80">Background: forest</option>
+    <option value="https://images.unsplash.com/photo-1519681393784-d120267933ba?w=2000&q=80">Background: night</option>
+    <option value="https://images.unsplash.com/photo-1470252649378-9c29740c9fa8?w=2000&q=80">Background: sunset</option>
+  </select>
+  <select id="ink">
+    <option value="#ffffff">Text: white</option>
+    <option value="#111111">Text: black</option>
+  </select>`;
+controls.append(modes);
+toggle('button',   'Button mode (hover / press feedback)');
+toggle('floating', 'Floating (drag the field around)');
+
+modes.querySelector('#bevel').addEventListener('change', e => {
+  config.bevelMode = Number(e.target.value);
+  reinit();
+});
+modes.querySelector('#bgpick').addEventListener('change', e => {
+  bg.addEventListener('load', () => instance?.markChanged(bg), { once:true });
+  bg.src = e.target.value;
+});
+modes.querySelector('#ink').addEventListener('change', e => {
+  layout.__ink = e.target.value;
+  applyLayout();
+});
+
+document.getElementById('copy').addEventListener('click', async (e) => {
+  await navigator.clipboard.writeText(JSON.stringify(config, null, 2));
+  e.target.textContent = 'Copied';
+  setTimeout(() => (e.target.textContent = 'Copy JSON'), 1200);
+});
+document.getElementById('reset').addEventListener('click', () => {
+  config = { ...DEFAULT_CONFIG };
+  layout = { ...DEFAULT_LAYOUT };
+  controls.replaceChildren();
+  buildAll();
+  applyLayout();
+  reinit();
+});
+
+function buildAll() {
+  section('Shader', SHADER); section('Shape', SHAPE); section('Color', COLOR);
+  section('Shadow', SHADOW); section('Layout', LAYOUT);
+  controls.append(modes);
+  toggle('button', 'Button mode (hover / press feedback)');
+  toggle('floating', 'Floating (drag the field around)');
+}
+
+// ── FPS meter ─────────────────────────────────────────
+const fpsEl = document.getElementById('fps');
+let frames = 0, last = performance.now();
+(function tick(now) {
+  frames++;
+  if (now - last >= 500) {
+    fpsEl.textContent = Math.round(frames * 1000 / (now - last)) + ' fps';
+    frames = 0; last = now;
+  }
+  requestAnimationFrame(tick);
+})(performance.now());
+
+// ── Go ────────────────────────────────────────────────
+applyLayout();
+applyConfig();
+try {
+  await start();
+} catch (err) {
+  console.warn('LiquidGlass unavailable:', err);
+  field.style.background = 'rgba(255,255,255,.18)';
+  field.style.backdropFilter = 'blur(12px)';
+}
+</script>
+</body>
+</html>
